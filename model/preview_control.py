@@ -1,3 +1,7 @@
 import numpy as np
-import math
+import matplotlib as mtpltlb
 
+class footsteps:
+    def __init__(self, x, y, dt):
+        
+        
