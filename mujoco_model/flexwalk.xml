@@ -2,7 +2,7 @@
 
 <compiler angle="degree"/>
 
-<option gravity="0 0 0"/>
+<option gravity="0 0 -9.81"/>
 <visual>
 
     <headlight
