@@ -1,25 +1,32 @@
 """
-Trajectory Planning and Inverse Kinematics for a 10-DOF Biped Robot.
+Trajectory Planning and Inverse Kinematics for a 10-DOF Biped Robot
+(plus 1 translational pelvis DOF for forward locomotion).
 
 Implementation based on:
   Bajrami et al., "Trajectory Planning and Inverse Kinematics Solver
   for Real Biped Robot with 10 DOF-s", IFAC-PapersOnLine 49-29 (2016).
 
-The biped has a fixed pelvis and 5 DOF per leg:
+The pelvis now has a slide joint along X (added to flexwalk.xml), so the
+hip trajectory computed via compute_smooth_trajectory() actually drives the
+whole robot forward across the floor instead of marching in place. Legs
+still have 5 DOF per side:
   hip_roll, hip_pitch, knee_pitch, ankle_pitch, ankle_roll.
 
 Gait is decomposed into:
   - SSP (Single Support Phase): swing foot follows polynomial trajectory
   - DSP (Double Support Phase): weight transfer between feet
 
-Joint mapping (qpos indices):
-  Left leg:  0=hip_roll_L, 1=hip_pitch_L, 2=knee_pitch_L, 3=ankle_pitch_L, 4=ankle_roll_L
-  Right leg: 5=hip_roll_R, 6=hip_pitch_R, 7=knee_pitch_R, 8=ankle_pitch_R, 9=ankle_roll_R
+Joint mapping (by name -> qpos address, resolved at runtime so it stays
+correct regardless of model joint ordering):
+  pelvis_x   : pelvis translation along world X
+  Left leg:  hip_roll_L, hip_pitch_L, knee_pitch_L, ankle_pitch_L, ankle_roll_L
+  Right leg: hip_roll_R, hip_pitch_R, knee_pitch_R, ankle_pitch_R, ankle_roll_R
 
 MuJoCo Y-axis hinge convention:
   Positive hip_pitch → thigh swings backward (-X)
   Negative hip_pitch → thigh swings forward (+X)
   FK: knee_x = hip_x - L1*sin(θh), knee_z = hip_z - L1*cos(θh)
+  (hip_x here is the instantaneous world-frame pelvis x, i.e. pelvis_x)
 """
 
 import numpy as np
@@ -36,13 +43,33 @@ data = mujoco.MjData(model)
 sim_dt = model.opt.timestep
 
 # ---------------------------------------------------------------------------
+# Joint name -> qpos address lookup (robust to joint ordering in the XML)
+# ---------------------------------------------------------------------------
+JOINT_NAMES = [
+    "pelvis_x",
+    "hip_roll_L", "hip_pitch_L", "knee_pitch_L", "ankle_pitch_L", "ankle_roll_L",
+    "hip_roll_R", "hip_pitch_R", "knee_pitch_R", "ankle_pitch_R", "ankle_roll_R",
+]
+QADR = {name: model.joint(name).qposadr[0] for name in JOINT_NAMES}
+
+
+def make_qpos(values):
+    """Build a full-length qpos array (size model.nq) from a
+    {joint_name: angle} dict, using the runtime-resolved addresses."""
+    qpos = np.zeros(model.nq)
+    for name, val in values.items():
+        qpos[QADR[name]] = val
+    return qpos
+
+
+# ---------------------------------------------------------------------------
 # Robot dimensions (from the MJCF file)
 # ---------------------------------------------------------------------------
 L_UPPER = 0.325   # hip_pitch joint → knee_pitch joint (m)
 L_LOWER = 0.225   # knee_pitch joint → ankle_pitch joint (m)
 L_ANKLE = 0.04    # ankle_pitch joint → foot sole (m)
 HIP_Y_OFFSET = 0.07  # lateral hip offset from pelvis centre (m)
-PELVIS_Z = 0.6    # fixed pelvis height (m)
+PELVIS_Z = 0.6    # fixed pelvis height (m) — no vertical DOF added
 
 # Joint limits (radians, from the XML)
 ANKLE_PITCH_LIM = math.radians(45)   # ±45°
@@ -121,6 +148,8 @@ def compute_foot_swing_trajectory(dt, T_s, step_length, foot_clearance,
 def compute_smooth_trajectory(dt, duration, x_start, x_end, v_start, v_end):
     """
     Smooth 3rd-order polynomial trajectory (hip motion per paper eq. 16/17).
+    Drives pelvis_x continuously — this is what actually walks the robot
+    forward now that the pelvis has a real translational DOF.
     """
     T = duration
     c0 = x_start
@@ -212,43 +241,59 @@ def compute_rolls(y_offset, leg_height):
 # ===========================================================================
 def generate_gait_trajectory(num_steps, dt):
     """
-    Generate a repeatable walking gait pattern.
+    Generate a continuously-forward walking gait pattern.
 
-    Since the pelvis is fixed, foot positions are computed relative to the
-    fixed hip. The swing foot advances forward while the stance foot holds.
-    After each complete step, both foot positions are re-centred around the
-    hip to prevent drift — this creates a repeatable "marching" gait.
+    hip_x, left_foot_x, right_foot_x are persistent state carried across
+    the whole gait (never reset). Each step:
+      - the stance foot stays exactly where it is (SSP),
+      - the swing foot starts from its own actual last touchdown position
+        and advances step_length beyond the (fixed) stance foot,
+      - the pelvis itself glides forward via compute_smooth_trajectory(),
+        now physically driving the pelvis_x slide joint,
+      - DSP uses the real post-touchdown foot positions, not ±SL/2.
 
-    Returns list of np.ndarray(10,) joint angle frames.
+    Returns list of np.ndarray(model.nq,) qpos frames.
     """
     frames = []
 
+    # ---- Persistent state -------------------------------------------------
     hip_x = 0.0
     hip_z = PELVIS_Z
+    left_foot_x = -SL / 2.0
+    right_foot_x = SL / 2.0
+    # -------------------------------------------------------------------
 
     swing_is_left = True
 
     for step_idx in range(num_steps):
-        # Re-centre foot positions at the start of each step to prevent drift.
-        # This creates an alternating pattern: one foot forward, one back.
-        half_step = SL / 2.0
-
+        # Current actual foot positions (no artificial re-centring/reset)
         if swing_is_left:
-            # Left foot is behind (about to swing forward), right is stance (ahead)
-            swing_start_x = half_step
-            stance_x = -half_step
+            swing_start_x = left_foot_x
+            stance_x = right_foot_x
         else:
-            # Right foot is behind (about to swing forward), left is stance (ahead)
-            swing_start_x = half_step
-            stance_x = -half_step
+            swing_start_x = right_foot_x
+            stance_x = left_foot_x
 
-        swing_end_x = half_step  # swing foot lands at the forward position
+        # Swing foot lands a step-length ahead of the current stance foot —
+        # this is what makes the gait progress forward indefinitely instead
+        # of oscillating around a fixed point.
+        swing_end_x = stance_x + SL
+
+        # Pelvis advances smoothly toward the midpoint of the new support
+        # polygon (average of stance foot and swing landing spot).
+        hip_x_target = 0.5 * (stance_x + swing_end_x)
 
         # ---------------------------------------------------------------
-        # Phase 1: SSP — swing foot lifts and advances
+        # Phase 1: SSP — swing foot lifts and advances, stance foot fixed
         # ---------------------------------------------------------------
         swing_x, swing_z = compute_foot_swing_trajectory(
-            dt, T_SSP, SL, HM, swing_start_x, ANKLE_REST_Z
+            dt, T_SSP, swing_end_x - swing_start_x, HM, swing_start_x, ANKLE_REST_Z
+        )
+
+        # Pelvis glides smoothly across SSP (zero velocity at both ends) —
+        # this trajectory now drives the real pelvis_x DOF.
+        hip_x_traj_ssp = compute_smooth_trajectory(
+            dt, T_SSP, hip_x, hip_x_target, 0.0, 0.0
         )
 
         # Lateral sway: shift toward stance foot
@@ -256,73 +301,92 @@ def generate_gait_trajectory(num_steps, dt):
         sway_start = 0.0
         y_sway_ssp = compute_lateral_sway(dt, T_SSP, sway_start, sway_target)
 
-        n_ssp = min(len(swing_x), len(y_sway_ssp))
+        n_ssp = min(len(swing_x), len(y_sway_ssp), len(hip_x_traj_ssp))
 
         for i in range(n_ssp):
             y_sway = y_sway_ssp[i]
+            cur_hip_x = hip_x_traj_ssp[i]
             leg_h = hip_z - ANKLE_REST_Z
 
-            # Swing leg IK
+            # Swing leg IK (relative to the instantaneous, moving hip)
             sw_hip, sw_knee, sw_ankle = ik_2link(
-                hip_x, hip_z, swing_x[i], swing_z[i], L_UPPER, L_LOWER
+                cur_hip_x, hip_z, swing_x[i], swing_z[i], L_UPPER, L_LOWER
             )
             sw_hr, sw_ar = compute_rolls(y_sway, leg_h)
 
-            # Stance leg IK — foot stays planted
+            # Stance leg IK — foot stays exactly planted at stance_x
             st_hip, st_knee, st_ankle = ik_2link(
-                hip_x, hip_z, stance_x, ANKLE_REST_Z, L_UPPER, L_LOWER
+                cur_hip_x, hip_z, stance_x, ANKLE_REST_Z, L_UPPER, L_LOWER
             )
             st_hr, st_ar = compute_rolls(y_sway, leg_h)
 
-            qpos = np.zeros(10)
+            values = {"pelvis_x": cur_hip_x}
             if swing_is_left:
-                qpos[0], qpos[1], qpos[2] = sw_hr, sw_hip, sw_knee
-                qpos[3], qpos[4] = sw_ankle, sw_ar
-                qpos[5], qpos[6], qpos[7] = st_hr, st_hip, st_knee
-                qpos[8], qpos[9] = st_ankle, st_ar
+                values["hip_roll_L"], values["hip_pitch_L"], values["knee_pitch_L"] = sw_hr, sw_hip, sw_knee
+                values["ankle_pitch_L"], values["ankle_roll_L"] = sw_ankle, sw_ar
+                values["hip_roll_R"], values["hip_pitch_R"], values["knee_pitch_R"] = st_hr, st_hip, st_knee
+                values["ankle_pitch_R"], values["ankle_roll_R"] = st_ankle, st_ar
             else:
-                qpos[0], qpos[1], qpos[2] = st_hr, st_hip, st_knee
-                qpos[3], qpos[4] = st_ankle, st_ar
-                qpos[5], qpos[6], qpos[7] = sw_hr, sw_hip, sw_knee
-                qpos[8], qpos[9] = sw_ankle, sw_ar
-            frames.append(qpos)
+                values["hip_roll_L"], values["hip_pitch_L"], values["knee_pitch_L"] = st_hr, st_hip, st_knee
+                values["ankle_pitch_L"], values["ankle_roll_L"] = st_ankle, st_ar
+                values["hip_roll_R"], values["hip_pitch_R"], values["knee_pitch_R"] = sw_hr, sw_hip, sw_knee
+                values["ankle_pitch_R"], values["ankle_roll_R"] = sw_ankle, sw_ar
+            frames.append(make_qpos(values))
+
+        # Advance persistent hip_x to where SSP left it
+        hip_x = hip_x_traj_ssp[-1] if n_ssp else hip_x
+
+        # Touchdown: swing foot has now landed — update persistent state
+        if swing_is_left:
+            left_foot_x = swing_end_x
+        else:
+            right_foot_x = swing_end_x
 
         # ---------------------------------------------------------------
         # Phase 2: DSP — both feet on ground, weight shifts to centre
         # ---------------------------------------------------------------
         y_sway_dsp = compute_lateral_sway(dt, T_DSP, sway_target, 0.0)
 
-        n_dsp = len(y_sway_dsp)
+        # Pelvis continues smoothly forward during DSP toward the midpoint
+        # of the (now updated) actual foot positions.
+        hip_x_dsp_target = 0.5 * (left_foot_x + right_foot_x)
+        hip_x_traj_dsp = compute_smooth_trajectory(
+            dt, T_DSP, hip_x, hip_x_dsp_target, 0.0, 0.0
+        )
+
+        n_dsp = min(len(y_sway_dsp), len(hip_x_traj_dsp))
         for i in range(n_dsp):
             y_sway = y_sway_dsp[i]
+            cur_hip_x = hip_x_traj_dsp[i]
             leg_h = hip_z - ANKLE_REST_Z
 
-            # Both feet on ground: one at +half_step, one at -half_step
-            # After swing, the swing foot has landed at swing_end_x
-            front_x = half_step
-            back_x = -half_step
-
-            l_ankle_x = front_x if swing_is_left else back_x
-            r_ankle_x = back_x if swing_is_left else front_x
+            # Use the actual current foot positions (post touchdown)
+            l_ankle_x = left_foot_x
+            r_ankle_x = right_foot_x
 
             l_hip, l_knee, l_ankle = ik_2link(
-                hip_x, hip_z, l_ankle_x, ANKLE_REST_Z, L_UPPER, L_LOWER
+                cur_hip_x, hip_z, l_ankle_x, ANKLE_REST_Z, L_UPPER, L_LOWER
             )
             r_hip, r_knee, r_ankle = ik_2link(
-                hip_x, hip_z, r_ankle_x, ANKLE_REST_Z, L_UPPER, L_LOWER
+                cur_hip_x, hip_z, r_ankle_x, ANKLE_REST_Z, L_UPPER, L_LOWER
             )
 
             l_hr, l_ar = compute_rolls(y_sway, leg_h)
             r_hr, r_ar = compute_rolls(y_sway, leg_h)
 
-            qpos = np.zeros(10)
-            qpos[0], qpos[1], qpos[2] = l_hr, l_hip, l_knee
-            qpos[3], qpos[4] = l_ankle, l_ar
-            qpos[5], qpos[6], qpos[7] = r_hr, r_hip, r_knee
-            qpos[8], qpos[9] = r_ankle, r_ar
-            frames.append(qpos)
+            values = {
+                "pelvis_x": cur_hip_x,
+                "hip_roll_L": l_hr, "hip_pitch_L": l_hip, "knee_pitch_L": l_knee,
+                "ankle_pitch_L": l_ankle, "ankle_roll_L": l_ar,
+                "hip_roll_R": r_hr, "hip_pitch_R": r_hip, "knee_pitch_R": r_knee,
+                "ankle_pitch_R": r_ankle, "ankle_roll_R": r_ar,
+            }
+            frames.append(make_qpos(values))
 
-        # Swap swing leg
+        # Advance persistent hip_x to where DSP left it
+        hip_x = hip_x_traj_dsp[-1] if n_dsp else hip_x
+
+        # Swap swing leg for next step
         swing_is_left = not swing_is_left
 
     return frames
@@ -345,13 +409,13 @@ def clamp_joints(qpos, mdl):
 # ===========================================================================
 def main():
     print("=" * 60)
-    print("FlexWalk — Trajectory Planning & IK for 10-DOF Biped")
+    print("FlexWalk — Trajectory Planning & IK for Biped (pelvis + 10 leg DOF)")
     print("  Based on Bajrami et al. (IFAC 2016)")
     print("=" * 60)
     print(f"  Upper leg  : {L_UPPER} m")
     print(f"  Lower leg  : {L_LOWER} m")
     print(f"  Ankle link : {L_ANKLE} m")
-    print(f"  Pelvis z   : {PELVIS_Z} m (fixed)")
+    print(f"  Pelvis z   : {PELVIS_Z} m (fixed; pelvis_x is now free to translate)")
     print(f"  Ankle rest : {ANKLE_REST_Z} m (knee bend "
           f"≈ {abs(math.degrees(math.acos((L_UPPER**2+L_LOWER**2-(PELVIS_Z-ANKLE_REST_Z)**2)/(2*L_UPPER*L_LOWER)) - math.pi)):.0f}°)")
     print(f"  Step length: {SL} m,  Foot clearance: {HM} m")
@@ -361,35 +425,35 @@ def main():
     print("\nGenerating gait trajectory...")
     frames = generate_gait_trajectory(NUM_STEPS, PLAYBACK_DT)
     print(f"  Generated {len(frames)} frames ({len(frames)*PLAYBACK_DT:.2f}s)")
+    print(f"  Net forward travel: {frames[-1][QADR['pelvis_x']]:.3f} m")
 
-    # Verify joint limits
-    joint_names = [
-        "hip_roll_L", "hip_pitch_L", "knee_pitch_L",
-        "ankle_pitch_L", "ankle_roll_L",
-        "hip_roll_R", "hip_pitch_R", "knee_pitch_R",
-        "ankle_pitch_R", "ankle_roll_R",
-    ]
+    # Verify joint limits (by name, so it stays correct regardless of order)
     violations = 0
     for fi, f in enumerate(frames):
-        for ji in range(10):
+        for name in JOINT_NAMES:
+            ji = model.joint(name).id
             lo, hi = model.jnt_range[ji]
-            if f[ji] < lo - 0.01 or f[ji] > hi + 0.01:
+            val = f[QADR[name]]
+            if val < lo - 0.01 or val > hi + 0.01:
                 if violations < 3:
-                    print(f"  WARN: frame {fi}, {joint_names[ji]} = "
-                          f"{math.degrees(f[ji]):+.1f}°, "
-                          f"range=[{math.degrees(lo):.0f}°, {math.degrees(hi):.0f}°]")
+                    print(f"  WARN: frame {fi}, {name} = "
+                          f"{math.degrees(val):+.1f}°/m, "
+                          f"range=[{lo:.3f}, {hi:.3f}]")
                 violations += 1
     if violations == 0:
-        print("  ✓ All joint angles within limits")
+        print("  ✓ All joint values within limits")
     else:
         print(f"  ⚠ {violations} limit violations (clamped at runtime)")
 
     # Print sample angles
-    print("\nSample frames (degrees):")
+    print("\nSample frames:")
     for idx in [0, len(frames)//4, len(frames)//2]:
         print(f"  Frame {idx}:")
-        for name, val in zip(joint_names, np.degrees(frames[idx])):
-            print(f"    {name:20s} = {val:+7.2f}°")
+        for name in JOINT_NAMES:
+            val = frames[idx][QADR[name]]
+            unit = "m" if name == "pelvis_x" else "deg"
+            disp = val if name == "pelvis_x" else math.degrees(val)
+            print(f"    {name:14s} = {disp:+7.3f} {unit}")
 
     print("\nLaunching MuJoCo viewer — gait plays in loop.")
     print("  Close the viewer window to exit.\n")

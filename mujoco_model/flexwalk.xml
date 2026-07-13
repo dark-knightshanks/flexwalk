@@ -66,6 +66,12 @@
         size="10 10 0.1"
         material="ground_mat"/>
   <body name="pelvis" pos="0 0 0.6">
+    <!-- Translational DOF along X so the whole robot can walk forward
+         across the floor instead of marching in place. The trajectory
+         generator drives this joint directly (kinematic playback via
+         mj_forward), so damping/armature here only matter if this model
+         is ever used with a torque-driven/dynamic controller. -->
+    <joint name="pelvis_x" type="slide" axis="1 0 0" range="-5 5" damping="5" armature="0.01"/>
     <geom name="pelvis_geom" type="box" size="0.05 0.1 0.05"/>
 
     <!-- LEFT LEG -->
@@ -74,7 +80,7 @@
       <geom type="sphere" size="0.02" rgba="1 0 0 1"/>
 
       <body name="hip_pitch_L" pos="0 0 0">
-        <joint name="hip_pitch_L" type="hinge" axis="0 1 0" range="-60 90"/>
+        <joint name="hip_pitch_L" type="hinge" axis="0 -1 0" range="-60 90"/>
         <geom type="sphere" size="0.02" />
 
         <body name="thigh_L" pos="0 0 -0.175">
@@ -82,7 +88,7 @@
           <inertial pos="0 0 0" mass="0.5" diaginertia="0.005 0.005 0.001"/>
 
           <body name="knee_pitch_L" pos="0 0 -0.15">
-            <joint name="knee_pitch_L" type="hinge" axis="0 1 0" range="-120 0"/>
+            <joint name="knee_pitch_L" type="hinge" axis="0 -1 0" range="-120 0"/>
             <geom type="sphere" size="0.02"/>
 
             <body name="shank_L" pos="0 0 -0.125">
@@ -90,7 +96,7 @@
               <inertial pos="0 0 0" mass="0.3" diaginertia="0.003 0.003 0.001"/>
 
               <body name="ankle_pitch_L" pos="0 0 -0.10">
-                <joint name="ankle_pitch_L" type="hinge" axis="0 1 0" range="-45 45"/>
+                <joint name="ankle_pitch_L" type="hinge" axis="0 -1 0" range="-45 45"/>
                 <geom type="sphere" size="0.015"/>
 
                 <body name="ankle_roll_L" pos="0 0 0">
@@ -115,7 +121,7 @@
       <geom type="sphere" size="0.02" rgba ="1 0 0 1"/>
 
       <body name="hip_pitch_R" pos="0 0 0">
-        <joint name="hip_pitch_R" type="hinge" axis="0 1 0" range="-60 90"/>
+        <joint name="hip_pitch_R" type="hinge" axis="0 -1 0" range="-60 90"/>
         <geom type="sphere" size="0.02"/>
 
         <body name="thigh_R" pos="0 0 -0.175">
@@ -123,7 +129,7 @@
           <inertial pos="0 0 0" mass="0.5" diaginertia="0.005 0.005 0.001"/>
 
           <body name="knee_pitch_R" pos="0 0 -0.15">
-            <joint name="knee_pitch_R" type="hinge" axis="0 1 0" range="-120 0"/>
+            <joint name="knee_pitch_R" type="hinge" axis="0 -1 0" range="-120 0"/>
             <geom type="sphere" size="0.02"/>
 
             <body name="shank_R" pos="0 0 -0.125">
@@ -131,7 +137,7 @@
               <inertial pos="0 0 0" mass="0.3" diaginertia="0.003 0.003 0.001"/>
 
               <body name="ankle_pitch_R" pos="0 0 -0.10">
-                <joint name="ankle_pitch_R" type="hinge" axis="0 1 0" range="-45 45"/>
+                <joint name="ankle_pitch_R" type="hinge" axis="0 -1 0" range="-45 45"/>
                 <geom type="sphere" size="0.015"/>
 
                 <body name="ankle_roll_R" pos="0 0 0">
@@ -155,5 +161,3 @@
   </body>
 </worldbody>
 </mujoco>
-
-
