@@ -42,6 +42,7 @@ SM = 0.5           # Fractional time of max clearance (0–1)
 # Ankle rest z: chosen so hip-to-ankle distance avoids singularity at L1+L2=0.55
 # With ANKLE_REST_Z = 0.10, distance = 0.6-0.10 = 0.50, knee bends ~26°
 ANKLE_REST_Z = 0.10
+z_c = PELVIS_Z - ANKLE_REST_Z
 
 NUM_STEPS = 16
 PLAYBACK_DT = 0.01
@@ -119,6 +120,16 @@ def zmp_reference(footsteps, T_ssp, T_dsp, dt):
         p_ref_x.append(p_ref_x[-1])
     
     return p_ref_x, p_ref_y
+
+def preview_control(dt, g, z_c):
+    A = np.array([
+        [1, dt, dt**2/2],
+        [0, 1, dt],
+        [0, 0, 1]
+    ])
+    B = np.array(((dt**3)/6), ((dt**2)/2), dt)
+    C = np.array(1, 0, -z_c/g)
+    
 
 
         
