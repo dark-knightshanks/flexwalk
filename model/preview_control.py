@@ -5,6 +5,7 @@ import mujoco.viewer
 import math
 import time
 import trajectoryplanning_ik as ik
+import scipy
 
 # Load mujoco model
 model = mujoco.MjModel.from_xml_path("mujoco_model/flexwalk.xml")
@@ -121,18 +122,51 @@ def zmp_reference(footsteps, T_ssp, T_dsp, dt):
     
     return p_ref_x, p_ref_y
 
-def preview_control(dt, g, z_c):
+def preview_control(dt, g, z_c, N):
+    Q_e = 1.0 
     A = np.array([
         [1, dt, dt**2/2],
         [0, 1, dt],
         [0, 0, 1]
     ])
-    B = np.array(((dt**3)/6), ((dt**2)/2), dt)
-    C = np.array(1, 0, -z_c/g)
+    B = np.array([[dt**3/6],
+              [dt**2/2],
+              [dt]])                 # shape (3,1)
+
+    C = np.array([[1, 0, -z_c/g]])       # shape (1,3)
     
+        # --- augmented system with integral of tracking error ---
+    # state: [ e_zmp, x_state ]^T  where e_zmp integrates (p_ref - p)
+    A_hat = np.block([
+        [np.eye(1),           C @ A],
+        [np.zeros((3, 1)),    A]
+    ])
+    B_hat = np.vstack([C @ B, B])          # (4,1)
 
+    Q_hat = np.zeros((4, 4))
+    Q_hat[0, 0] = Q_e                       # only penalize ZMP error
 
-        
+    R = 1e-6
+    # --- solve discrete algebraic Riccati equation ---
+    P = scipy.linalg.solve_discrete_are(A_hat, B_hat, Q_hat, np.array([[R]]))
+
+    # --- feedback gains ---
+    BPB = (B_hat.T @ P @ B_hat)[0, 0] + R
+    K_hat = (1.0 / BPB) * (B_hat.T @ P @ A_hat)   # (1,4)
+
+    Gi = K_hat[0, 0]        # integral (error) gain
+    Gx = K_hat[0, 1:]       # state feedback gain (1,3)
+
+    # --- preview gains G_d(l), l = 1..N ---
+    Ac_hat = A_hat - B_hat @ K_hat          # closed-loop system matrix
+    Gd = np.zeros(N)
+    X = -Ac_hat.T @ P @ np.array([[1], [0], [0], [0]])  # seed vector
+
+    for l in range(N):
+        Gd[l] = (1.0 / BPB) * (B_hat.T @ X)[0, 0]
+        X = Ac_hat.T @ X
+
+    return A, B, C, Gx, Gi, Gd
 
 
 
